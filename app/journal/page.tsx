@@ -1,61 +1,128 @@
 "use client";
-import { useState, useEffect } from "react";
 
-const STORAGE_KEY = "trade_journal";
+import { useEffect, useMemo, useState } from "react";
 
-function loadTrades() {
+type Trade = {
+  id: number;
+  date: string;
+  code: string;
+  name: string;
+  type: string;
+  entry: number;
+  exit: number;
+  shares: number;
+  pnl: number;
+  pnl_pct: number;
+  commission: number;
+  result: string;
+  memo: string;
+};
+
+type TradeForm = {
+  date: string;
+  code: string;
+  name: string;
+  type: string;
+  entry: string;
+  exit: string;
+  shares: string;
+  memo: string;
+};
+
+const STORAGE_KEY = "trade-journal";
+
+const EMPTY_FORM: TradeForm = {
+  date: "",
+  code: "",
+  name: "",
+  type: "LONG",
+  entry: "",
+  exit: "",
+  shares: "",
+  memo: "",
+};
+
+function loadTrades(): Trade[] {
   if (typeof window === "undefined") return [];
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Trade[]) : [];
   } catch {
     return [];
   }
 }
 
-function saveTrades(trades) {
+function saveTrades(trades: Trade[]): void {
+  if (typeof window === "undefined") return;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
 }
 
-const EMPTY_FORM = {
-  date: new Date().toISOString().slice(0, 10),
-  code: "",
-  name: "",
-  type: "day",
-  entry: "",
-  exit: "",
-  shares: "",
-  result: "",
-  memo: "",
-};
+function calcCommission(amount: number): number {
+  if (amount <= 100000) return 99;
+  if (amount <= 200000) return 115;
+  if (amount <= 500000) return 275;
+  if (amount <= 1000000) return 535;
+  return 640;
+}
 
 export default function JournalPage() {
-  const [trades, setTrades] = useState([]);
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [showForm, setShowForm] = useState(false);
-  const [filter, setFilter] = useState("all");
-  const [btResults, setBtResults] = useState([]);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [showForm, setShowForm] = useState<boolean>(false);
+  const [form, setForm] = useState<TradeForm>(EMPTY_FORM);
 
   useEffect(() => {
     setTrades(loadTrades());
-    fetch("/api/backtest-results")
-      .then((r) => r.json())
-      .then((d) => setBtResults(d.data ?? []))
-      .catch(() => {});
   }, []);
 
-  const handleAdd = () => {
-    if (!form.code || !form.entry || !form.exit || !form.shares) return;
-    const entry = parseFloat(form.entry);
-    const exit = parseFloat(form.exit);
-    const shares = parseInt(form.shares);
-    const pnl = (exit - entry) * shares;
-    const pnlPct = ((exit - entry) / entry * 100);
-    // 楽天証券手数料
-    const commission = calcCommission(entry * shares) + calcCommission(exit * shares);
-    const pnlNet = pnl - commission;
-    const result = pnlNet >= 0 ? "WIN" : "LOSS";
+  const totals = useMemo(() => {
+    const totalPnl = trades.reduce((sum: number, t: Trade) => sum + t.pnl, 0);
+    const wins = trades.filter((t: Trade) => t.pnl > 0).length;
+    const losses = trades.filter((t: Trade) => t.pnl < 0).length;
+    const winRate =
+      trades.length > 0 ? (wins / trades.length) * 100 : 0;
 
-    const newTrade = {
+    return {
+      totalPnl,
+      wins,
+      losses,
+      winRate,
+      count: trades.length,
+    };
+  }, [trades]);
+
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
+  ): void => {
+    const { name, value } = e.target;
+    setForm((prev: TradeForm) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>): void => {
+    e.preventDefault();
+
+    const entry = Number(form.entry);
+    const exit = Number(form.exit);
+    const shares = Number(form.shares);
+
+    if (!form.date || !form.code || !form.name || !entry || !exit || !shares) {
+      return;
+    }
+
+    const buyAmount = entry * shares;
+    const sellAmount = exit * shares;
+    const commission = calcCommission(buyAmount) + calcCommission(sellAmount);
+
+    const gross =
+      form.type === "LONG"
+        ? (exit - entry) * shares
+        : (entry - exit) * shares;
+
+    const pnl = gross - commission;
+    const pnl_pct = entry !== 0 ? (gross / (entry * shares)) * 100 : 0;
+
+    const newTrade: Trade = {
       id: Date.now(),
       date: form.date,
       code: form.code,
@@ -64,314 +131,206 @@ export default function JournalPage() {
       entry,
       exit,
       shares,
-      pnl: Math.round(pnlNet),
-      pnl_pct: parseFloat(pnlPct.toFixed(2)),
+      pnl,
+      pnl_pct,
       commission,
-      result,
+      result: pnl >= 0 ? "WIN" : "LOSS",
       memo: form.memo,
     };
 
-    const updated = [...trades, newTrade].sort((a, b) => b.date.localeCompare(a.date));
+    const updated = [...trades, newTrade].sort((a: Trade, b: Trade) =>
+      b.date.localeCompare(a.date)
+    );
+
     setTrades(updated);
     saveTrades(updated);
     setForm(EMPTY_FORM);
     setShowForm(false);
   };
 
-  const handleDelete = (id) => {
-    const updated = trades.filter((t) => t.id !== id);
+  const handleDelete = (id: number): void => {
+    const updated = trades.filter((t: Trade) => t.id !== id);
     setTrades(updated);
     saveTrades(updated);
   };
 
-  function calcCommission(amount) {
-    if (amount <= 100000) return 99;
-    if (amount <= 200000) return 115;
-    if (amount <= 500000) return 275;
-    if (amount <= 1000000) return 535;
-    return 1013;
-  }
-
-  const filtered = trades.filter((t) => {
-    if (filter === "day") return t.type === "day";
-    if (filter === "swing") return t.type === "swing";
-    if (filter === "win") return t.result === "WIN";
-    if (filter === "loss") return t.result === "LOSS";
-    return true;
-  });
-
-  const total = trades.length;
-  const wins = trades.filter((t) => t.result === "WIN").length;
-  const winRate = total > 0 ? (wins / total * 100).toFixed(1) : 0;
-  const totalPnl = trades.reduce((a, b) => a + b.pnl, 0);
-
-  // バックテストとの比較
-  const btTotal = btResults.length;
-  const btWins = btResults.filter((r) => r.result === "WIN").length;
-  const btWinRate = btTotal > 0 ? (btWins / btTotal * 100).toFixed(1) : 0;
-  const btPnlPct = 104.9; // 確定値
-
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-mono">
-      {/* ヘッダー */}
-      <header className="border-b border-zinc-800 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <a href="/" className="text-zinc-600 hover:text-zinc-300 text-xs">← スキャナー</a>
-          <span className="text-zinc-800">|</span>
-          <a href="/backtest" className="text-zinc-600 hover:text-zinc-300 text-xs">バックテスト</a>
-          <span className="text-zinc-800">|</span>
-          <span className="text-sm font-bold tracking-widest">TRADE JOURNAL</span>
+    <main className="min-h-screen bg-black text-white p-6">
+      <div className="mx-auto max-w-6xl">
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold">トレード日誌</h1>
+            <p className="mt-2 text-sm text-zinc-400">
+              売買履歴の記録と振り返り
+            </p>
+          </div>
+          <button
+            onClick={() => setShowForm((prev: boolean) => !prev)}
+            className="rounded-xl bg-white px-4 py-2 text-black font-semibold"
+          >
+            {showForm ? "閉じる" : "追加"}
+          </button>
         </div>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="px-4 py-1.5 text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors"
-        >
-          + トレード記録
-        </button>
-      </header>
 
-      <div className="px-6 py-4">
-        {/* 入力フォーム */}
+        <div className="mb-6 grid gap-4 md:grid-cols-4">
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+            <div className="text-sm text-zinc-400">総損益</div>
+            <div className="mt-2 text-2xl font-bold">
+              ¥{totals.totalPnl.toLocaleString()}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+            <div className="text-sm text-zinc-400">勝率</div>
+            <div className="mt-2 text-2xl font-bold">
+              {totals.winRate.toFixed(1)}%
+            </div>
+          </div>
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+            <div className="text-sm text-zinc-400">勝ち数 / 負け数</div>
+            <div className="mt-2 text-2xl font-bold">
+              {totals.wins} / {totals.losses}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+            <div className="text-sm text-zinc-400">件数</div>
+            <div className="mt-2 text-2xl font-bold">{totals.count}</div>
+          </div>
+        </div>
+
         {showForm && (
-          <div className="border border-zinc-700 bg-zinc-900 p-4 mb-6">
-            <div className="text-xs text-zinc-500 mb-3 tracking-wider">新規トレード記録</div>
-            <div className="grid grid-cols-4 gap-3 mb-3">
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">日付</div>
-                <input
-                  type="date"
-                  value={form.date}
-                  onChange={(e) => setForm({ ...form, date: e.target.value })}
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                />
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">銘柄コード</div>
-                <input
-                  type="text"
-                  value={form.code}
-                  onChange={(e) => setForm({ ...form, code: e.target.value })}
-                  placeholder="7203"
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                />
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">銘柄名</div>
-                <input
-                  type="text"
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder="トヨタ自動車"
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                />
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">種別</div>
-                <select
-                  value={form.type}
-                  onChange={(e) => setForm({ ...form, type: e.target.value })}
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                >
-                  <option value="day">デイトレ</option>
-                  <option value="swing">スイング</option>
-                </select>
-              </div>
-            </div>
-            <div className="grid grid-cols-4 gap-3 mb-3">
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">買値（円）</div>
-                <input
-                  type="number"
-                  value={form.entry}
-                  onChange={(e) => setForm({ ...form, entry: e.target.value })}
-                  placeholder="3500"
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                />
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">売値（円）</div>
-                <input
-                  type="number"
-                  value={form.exit}
-                  onChange={(e) => setForm({ ...form, exit: e.target.value })}
-                  placeholder="3600"
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                />
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">株数</div>
-                <input
-                  type="number"
-                  value={form.shares}
-                  onChange={(e) => setForm({ ...form, shares: e.target.value })}
-                  placeholder="100"
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                />
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600 mb-1">メモ</div>
-                <input
-                  type="text"
-                  value={form.memo}
-                  onChange={(e) => setForm({ ...form, memo: e.target.value })}
-                  placeholder="シグナル通り実行"
-                  className="w-full bg-zinc-800 border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200"
-                />
-              </div>
-            </div>
-            {form.entry && form.exit && form.shares && (
-              <div className="text-xs text-zinc-500 mb-3">
-                損益予測：
-                <span className={parseFloat(form.exit) >= parseFloat(form.entry) ? "text-emerald-400" : "text-red-400"}>
-                  ¥{Math.round((parseFloat(form.exit) - parseFloat(form.entry)) * parseInt(form.shares) - calcCommission(parseFloat(form.entry) * parseInt(form.shares)) - calcCommission(parseFloat(form.exit) * parseInt(form.shares))).toLocaleString()}
-                </span>
-                （手数料込み）
-              </div>
-            )}
-            <div className="flex gap-2">
-              <button
-                onClick={handleAdd}
-                className="px-4 py-1.5 text-xs bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30"
+          <form
+            onSubmit={handleSubmit}
+            className="mb-6 rounded-2xl border border-zinc-800 bg-zinc-900 p-4"
+          >
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              <input
+                name="date"
+                type="date"
+                value={form.date}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2"
+              />
+              <input
+                name="code"
+                placeholder="銘柄コード"
+                value={form.code}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2"
+              />
+              <input
+                name="name"
+                placeholder="銘柄名"
+                value={form.name}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2"
+              />
+              <select
+                name="type"
+                value={form.type}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2"
               >
-                記録する
-              </button>
+                <option value="LONG">LONG</option>
+                <option value="SHORT">SHORT</option>
+              </select>
+              <input
+                name="entry"
+                type="number"
+                placeholder="エントリー"
+                value={form.entry}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2"
+              />
+              <input
+                name="exit"
+                type="number"
+                placeholder="決済"
+                value={form.exit}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2"
+              />
+              <input
+                name="shares"
+                type="number"
+                placeholder="株数"
+                value={form.shares}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2"
+              />
+              <textarea
+                name="memo"
+                placeholder="メモ"
+                value={form.memo}
+                onChange={handleChange}
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 md:col-span-2 lg:col-span-4"
+              />
+            </div>
+
+            <div className="mt-4">
               <button
-                onClick={() => setShowForm(false)}
-                className="px-4 py-1.5 text-xs text-zinc-500 border border-zinc-700 hover:text-zinc-300"
+                type="submit"
+                className="rounded-xl bg-white px-4 py-2 text-black font-semibold"
               >
-                キャンセル
+                保存
               </button>
             </div>
-          </div>
+          </form>
         )}
 
-        {/* バックテストとの比較 */}
-        <div className="grid grid-cols-2 gap-3 mb-6">
-          <div className="border border-zinc-700 p-4">
-            <div className="text-xs text-zinc-500 mb-3 tracking-wider">📊 バックテスト（参考値）</div>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <div className="text-xs text-zinc-600">損益</div>
-                <div className="text-xl font-bold text-emerald-400">+{btPnlPct}%</div>
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600">勝率</div>
-                <div className="text-xl font-bold text-zinc-200">{btWinRate}%</div>
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600">件数</div>
-                <div className="text-xl font-bold text-zinc-200">{btTotal}件</div>
-              </div>
-            </div>
-          </div>
-
-          <div className="border border-emerald-500/20 bg-emerald-500/5 p-4">
-            <div className="text-xs text-emerald-400 mb-3 tracking-wider">🎯 実トレード成績</div>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <div className="text-xs text-zinc-600">損益合計</div>
-                <div className={`text-xl font-bold ${totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {totalPnl >= 0 ? "+" : ""}¥{totalPnl.toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600">勝率</div>
-                <div className={`text-xl font-bold ${parseFloat(winRate) >= 46 ? "text-emerald-400" : "text-yellow-400"}`}>
-                  {winRate}%
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-zinc-600">件数</div>
-                <div className="text-xl font-bold text-zinc-200">{total}件</div>
-              </div>
-            </div>
-            {total > 0 && (
-              <div className="mt-2 text-xs text-zinc-600">
-                {wins}勝 / {total - wins}敗
-              </div>
-            )}
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-zinc-950 text-zinc-400">
+                <tr>
+                  <th className="px-4 py-3 text-left">日付</th>
+                  <th className="px-4 py-3 text-left">コード</th>
+                  <th className="px-4 py-3 text-left">銘柄名</th>
+                  <th className="px-4 py-3 text-left">種別</th>
+                  <th className="px-4 py-3 text-right">損益</th>
+                  <th className="px-4 py-3 text-right">損益率</th>
+                  <th className="px-4 py-3 text-left">結果</th>
+                  <th className="px-4 py-3 text-left">メモ</th>
+                  <th className="px-4 py-3 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-6 text-center text-zinc-500">
+                      まだ記録がありません
+                    </td>
+                  </tr>
+                ) : (
+                  trades.map((trade: Trade) => (
+                    <tr key={trade.id} className="border-t border-zinc-800">
+                      <td className="px-4 py-3">{trade.date}</td>
+                      <td className="px-4 py-3">{trade.code}</td>
+                      <td className="px-4 py-3">{trade.name}</td>
+                      <td className="px-4 py-3">{trade.type}</td>
+                      <td className="px-4 py-3 text-right">
+                        ¥{trade.pnl.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {trade.pnl_pct.toFixed(2)}%
+                      </td>
+                      <td className="px-4 py-3">{trade.result}</td>
+                      <td className="px-4 py-3">{trade.memo}</td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => handleDelete(trade.id)}
+                          className="rounded-lg border border-zinc-700 px-3 py-1"
+                        >
+                          削除
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
-
-        {/* フィルター */}
-        <div className="flex gap-2 mb-4">
-          {[
-            { key: "all", label: "すべて" },
-            { key: "day", label: "デイトレ" },
-            { key: "swing", label: "スイング" },
-            { key: "win", label: "WIN" },
-            { key: "loss", label: "LOSS" },
-          ].map((f) => (
-            <button
-              key={f.key}
-              onClick={() => setFilter(f.key)}
-              className={`px-4 py-1.5 text-xs tracking-wider transition-all ${
-                filter === f.key
-                  ? "bg-zinc-100 text-zinc-900 font-bold"
-                  : "text-zinc-500 hover:text-zinc-300 border border-zinc-800"
-              }`}
-            >
-              {f.label}
-            </button>
-          ))}
-          <span className="text-xs text-zinc-600 self-center ml-2">{filtered.length}件</span>
-        </div>
-
-        {/* トレード一覧 */}
-        {filtered.length === 0 ? (
-          <div className="border border-zinc-800 p-8 text-center text-zinc-600 text-sm">
-            まだトレード記録がありません。「+ トレード記録」から追加してください。
-          </div>
-        ) : (
-          <div className="border border-zinc-800">
-            <div className="grid grid-cols-9 gap-2 px-4 py-2 border-b border-zinc-800 text-xs text-zinc-600">
-              <div>日付</div>
-              <div>コード</div>
-              <div>銘柄名</div>
-              <div>種別</div>
-              <div>買値</div>
-              <div>売値</div>
-              <div>損益%</div>
-              <div>損益額</div>
-              <div>結果</div>
-            </div>
-            {filtered.map((t) => (
-              <div
-                key={t.id}
-                className={`grid grid-cols-9 gap-2 px-4 py-2 border-b border-zinc-800/40 text-xs hover:bg-zinc-900 group ${
-                  t.result === "WIN" ? "border-l-2 border-l-emerald-500/30" : "border-l-2 border-l-red-500/30"
-                }`}
-              >
-                <div className="text-zinc-500">{t.date}</div>
-                <div className="text-zinc-300 font-bold">{t.code}</div>
-                <div className="text-zinc-400 truncate">{t.name || "-"}</div>
-                <div className={t.type === "day" ? "text-blue-400" : "text-purple-400"}>
-                  {t.type === "day" ? "デイ" : "SW"}
-                </div>
-                <div className="text-zinc-400">¥{t.entry?.toLocaleString()}</div>
-                <div className="text-zinc-400">¥{t.exit?.toLocaleString()}</div>
-                <div className={t.pnl_pct >= 0 ? "text-emerald-400" : "text-red-400"}>
-                  {t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct}%
-                </div>
-                <div className={t.pnl >= 0 ? "text-emerald-400" : "text-red-400"}>
-                  {t.pnl >= 0 ? "+" : ""}¥{t.pnl?.toLocaleString()}
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className={`font-bold ${t.result === "WIN" ? "text-emerald-400" : "text-red-400"}`}>
-                    {t.result}
-                  </span>
-                  <button
-                    onClick={() => handleDelete(t.id)}
-                    className="opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 transition-all"
-                  >
-                    ×
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
-    </div>
+    </main>
   );
 }
